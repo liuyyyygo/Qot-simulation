@@ -16,7 +16,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="QoT-Guaranteed Lightpath Routing Simulation for LEO SONs"
+        description="QoT performance simulation for traditional RWA in LEO SONs"
     )
     parser.add_argument("--figures", action="store_true",
                         help="Run multi-load simulation and generate paper figures")
@@ -34,6 +34,8 @@ if __name__ == "__main__":
     parser.add_argument("--medium", type=int, default=50)
     parser.add_argument("--high", type=int, default=200)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--observe-duration", type=float, default=None)
+    parser.add_argument("--observe-step", type=float, default=None)
 
     args, unknown = parser.parse_known_args()
 

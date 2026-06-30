@@ -16,7 +16,7 @@ try:
     from qot_simulation.simulation import (
         SimulationConfig, QoTSimulation, create_demo_requests, LightpathRequest
     )
-    from qot_simulation.plotting import SimulationDataCollector, generate_all_figures
+    from plotting import SimulationDataCollector, generate_all_figures
 except ImportError:
     from simulation import (
         SimulationConfig, QoTSimulation, create_demo_requests, LightpathRequest
@@ -32,8 +32,8 @@ def build_default_config() -> SimulationConfig:
         F=1,
         altitude_km=550.0,
         inclination_deg=53.0,
-        num_channels=40,
-        channel_spacing_GHz=50.0,
+        num_channels=24,
+        channel_spacing_GHz=25.0,
         data_rate_Gbps=10.0,
         tx_power_dBm=30.0,
         rx_aperture_diameter_mm=80.0,
@@ -41,16 +41,16 @@ def build_default_config() -> SimulationConfig:
         optical_efficiency=0.6,
         pointing_loss_dB=1.0,
         oxc_insertion_loss_dB=3.0,
-        oxc_isolation_dB=35.0,
-        optical_filter_BW_GHz=50.0,
-        demux_isolation_dB=30.0,
+        oxc_isolation_dB=30.0,
+        optical_filter_BW_GHz=12.5,
+        demux_isolation_dB=25.0,
         rx_thermal_noise_dBm=-40.0,
         osnr_ref_BW_GHz=12.5,
         rx_electrical_BW_GHz=7.5,
         nominal_gain_dB=20.0,
         nominal_nf_dB=5.0,
-        gain_degradation_slope=0.002,
-        nf_degradation_slope=0.0015,
+        gain_degradation_slope=0.10,
+        nf_degradation_slope=0.20,
         background_dose_rate=0.1,
         saa_enhancement=10.0,
         saa_center_lat_deg=-25.0,
@@ -68,6 +68,8 @@ def build_default_config() -> SimulationConfig:
         mission_age_years=3.0,
         path_duration_yr=0.1,
         sun_avoidance_angle_deg=3.0,
+        sun_coupling_scale_deg=5.0,
+        sun_coupling_order=4.0,
         sun_spectral_radiance=1.5e6,
         sky_spectral_radiance=3.0e-4,
         fov_solid_angle_sr=1.0e-10,
@@ -79,6 +81,8 @@ def run_traffic_level(
     num_requests: int,
     label: str,
     seed: int = 42,
+    observe_duration_s: float = 3600.0,
+    observe_step_s: float = 300.0,
 ):
     """Run simulation at a specific traffic level and collect data."""
     print(f"\n{'='*70}")
@@ -99,6 +103,13 @@ def run_traffic_level(
     collector = SimulationDataCollector(label)
     collector.collect_from_simulation(sim)
     collector.collect_results(results)
+    if observe_duration_s > 0 and observe_step_s > 0:
+        qot_samples = sim.evaluate_established_lightpaths_over_time(
+            results,
+            duration_s=observe_duration_s,
+            step_s=observe_step_s,
+        )
+        collector.collect_time_qot_samples(qot_samples)
 
     accepted = collector.num_accepted
     rejected = collector.num_rejected
@@ -153,6 +164,14 @@ def main():
         "--seed", type=int, default=42,
         help="Base random seed (default: 42)"
     )
+    parser.add_argument(
+        "--observe-duration", type=float, default=3600.0,
+        help="Time-window QoT observation duration in seconds (default: 3600)"
+    )
+    parser.add_argument(
+        "--observe-step", type=float, default=300.0,
+        help="Time-window QoT observation step in seconds (default: 300)"
+    )
     args = parser.parse_args()
 
     if args.starlink:
@@ -179,6 +198,8 @@ def main():
     print(f"FEC: {'HD-FEC (BER<2e-3)' if base_config.use_fec else 'No FEC (BER<1e-12)'}")
     print(f"Mission age: {base_config.mission_age_years} yr | "
           f"Path duration: {base_config.path_duration_yr} yr")
+    print(f"QoT observation window: {args.observe_duration:.0f} s | "
+          f"step: {args.observe_step:.0f} s")
 
     data_dict = {}
     sim_dict = {}
@@ -194,6 +215,8 @@ def main():
             n_req,
             level,
             seed=args.seed + seed_offset,
+            observe_duration_s=args.observe_duration,
+            observe_step_s=args.observe_step,
         )
         data_dict[level] = collector
         sim_dict[level] = sim

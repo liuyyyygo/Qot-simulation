@@ -6,6 +6,8 @@ __pycache__/
 *.png
 *.pdf
 figures/
+tmp/
+figures_qot_glr_*smoke*/
 .Python
 env/
 venv/
@@ -21,3 +23,9 @@ build/
 *.swo
 *~
 .DS_Store
+
+# Manuscript-ready figure outputs and source CSVs kept for reproducibility.
+!figures_dense25_filter12p5/
+!figures_dense25_filter12p5/**
+!figures_qot_glr_compare/
+!figures_qot_glr_compare/**

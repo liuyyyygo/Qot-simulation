@@ -96,6 +96,7 @@ class RWASolver:
         sun_avoidance_angle_deg: float = 3.0,
         max_cumulative_dose_krad: float = 50.0,
         ber_threshold: float = 2.0e-3,
+        enforce_qot_constraints: bool = False,
         ber_calculator: Optional["BERCalculator"] = None,
     ):
         self.num_sats = num_satellites
@@ -108,6 +109,7 @@ class RWASolver:
         self.sun_avoidance_deg = sun_avoidance_angle_deg
         self.max_dose_krad = max_cumulative_dose_krad
         self.ber_threshold = ber_threshold
+        self.enforce_qot_constraints = enforce_qot_constraints
 
         # Use provided BER calculator or create default
         self.ber_calc = ber_calculator
@@ -365,7 +367,7 @@ class RWASolver:
                 violations.append(
                     f"Hop count {len(path_links)} > max {self.max_hops}"
                 )
-                if len(violations) == 1:
+                if self.enforce_qot_constraints:
                     continue
 
             # Constraint 5: Link distance
@@ -374,7 +376,8 @@ class RWASolver:
             )
             if not dist_ok:
                 violations.append(f"Link distance exceeded on {violating_links}")
-                continue
+                if self.enforce_qot_constraints:
+                    continue
 
             # Constraint 4: Solar avoidance
             solar_ok, solar_violations = self.check_solar_avoidance(
@@ -382,7 +385,8 @@ class RWASolver:
             )
             if not solar_ok:
                 violations.append(f"Sun blocked on {solar_violations}")
-                continue
+                if self.enforce_qot_constraints:
+                    continue
 
             # Try wavelengths
             wavelength = self.first_fit_wavelength(path_links)
@@ -415,18 +419,21 @@ class RWASolver:
                 violations.append(
                     f"BER {ber:.2e} > threshold {self.ber_threshold:.2e}"
                 )
-                continue
+                if self.enforce_qot_constraints:
+                    continue
 
             # Constraint 6: Radiation dose
-            rad_ok, cumulative_dose = self.check_radiation_dose(
-                path_sats, sat_id_to_dose_rate, path_duration_yr
-            )
-            if not rad_ok:
-                violations.append(
-                    f"Cumulative dose {cumulative_dose:.2f} > max {self.max_dose_krad}"
+            cumulative_dose = 0.0
+            if self.enforce_qot_constraints:
+                rad_ok, cumulative_dose = self.check_radiation_dose(
+                    path_sats, sat_id_to_dose_rate, path_duration_yr
                 )
-                result.cumulative_radiation_krad = cumulative_dose
-                continue
+                if not rad_ok:
+                    violations.append(
+                        f"Cumulative dose {cumulative_dose:.2f} > max {self.max_dose_krad}"
+                    )
+                    result.cumulative_radiation_krad = cumulative_dose
+                    continue
 
             # All constraints passed — allocate wavelength
             self.allocate_wavelength(path_links, wavelength)
@@ -443,6 +450,7 @@ class RWASolver:
             result.per_link_osnr_dB = per_link_osnr
             result.per_link_distance_km = per_link_dist
             result.cumulative_radiation_krad = cumulative_dose
+            result.constraint_violations = violations
             return result
 
         # All paths failed — determine reason

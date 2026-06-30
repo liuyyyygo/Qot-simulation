@@ -253,4 +253,4 @@ def format_ber_scientific(ber: float) -> str:
         return "0.0"
     exponent = int(math.floor(math.log10(ber)))
     mantissa = ber / (10.0 ** exponent)
-    return f"{mantissa:.2f}×10^{exponent}"
+    return f"{mantissa:.2f}x10^{exponent}"

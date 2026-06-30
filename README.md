@@ -3,70 +3,127 @@
 Quality of Transmission (QoT) simulation for LEO satellite optical networks under
 WDM-based optical circuit switching (OXC) architecture.
 
-Simulates establishment of transparent optical lightpaths through a Walker-Delta
-constellation, computing end-to-end OSNR and BER under 5 physical impairments
-and 7 QoT constraints.
+The default experiment uses traditional shortest-path routing plus first-fit
+wavelength assignment. After each transparent lightpath is established, the
+simulator evaluates end-to-end OSNR and BER under multiple orbit-related
+physical impairments. This is intended to study the performance of conventional
+RWA when space-domain impairments are considered.
+
+QoT-constrained routing is available as an optional mode through
+`enforce_qot_constraints`, but it is disabled by default.
 
 ## Quick Start
 
 ```bash
-# Run small demo (10 requests on 12x11=132 satellite constellation)
+# Run small demo
 python run.py
 
 # Run demo with 20 requests
 python run.py --demo --num-requests 20
 
-# Generate all paper-quality figures (low/medium/high traffic)
+# Run representative 12x11 LEO constellation
+python run.py --leo --num-requests 50
+
+# Observe established-lightpath QoT dynamics for 10 minutes
+python run.py --demo --num-requests 20 --observe-duration 600 --observe-step 60
+
+# Generate paper-quality figures
 python run.py --figures --outdir ./figures
 ```
 
 ## Architecture
 
-```
+```text
 Qot-simulation-6-10/
-├── qot_simulation/          # Core simulation package
-│   ├── constellation.py     # Walker-Delta constellation, LISL topology
-│   ├── impairments.py       # 5 physical layer impairment models
-│   ├── osnr_ber.py          # OSNR accumulation + BER estimation
-│   ├── rwa.py               # RWA solver (K-SP + First-Fit, 7 QoT checks)
-│   └── simulation.py        # Top-level simulation engine + config
-├── plotting.py              # 16 paper-quality figures (Nature journal style)
-├── run_figures.py           # Multi-load simulation runner
-├── run.py                   # CLI entry point
-├── config.yaml              # Example YAML configuration
-└── README.md
+|-- qot_simulation/          # Core simulation package
+|   |-- constellation.py     # Walker-Delta circular-orbit constellation
+|   |-- impairments.py       # Physical impairment models
+|   |-- osnr_ber.py          # OSNR accumulation and BER estimation
+|   |-- rwa.py               # SP + First-Fit RWA solver
+|   `-- simulation.py        # Top-level simulation engine and config
+|-- plotting.py              # Figure generation
+|-- run_figures.py           # Multi-load simulation runner
+|-- run.py                   # CLI entry point
+|-- config.yaml              # Example YAML configuration
+`-- README.md
 ```
 
 ## Impairment Models
 
 | Impairment | Model |
 |---|---|
-| Free Space Loss | Friis transmission equation |
-| Doppler Shift & Filter Penalty | Δλ computation + Gaussian filter response |
-| Celestial Background | Solar/lunar/sky radiance → shot noise |
-| WDM Crosstalk | Inter- and intra-wavelength crosstalk (OXC + demux) |
-| SAA Radiation | Position-dependent EDFA gain/NF degradation |
+| Free-space loss | Friis transmission equation |
+| Doppler shift and filter penalty | Radial-velocity frequency shift with Gaussian filter response |
+| Celestial background | Solar/sky radiance converted to receiver noise power |
+| WDM crosstalk | Inter- and intra-wavelength crosstalk from demux/OXC leakage |
+| SAA radiation | Mission-age cumulative dose drives EDFA gain/NF degradation |
 
-## QoT Constraints
+## Default Routing Assumption
 
-1. Wavelength continuity (transparent path)
-2. Wavelength clash (distinct λ per LISL)
-3. BER/FEC threshold (HD-FEC: BER < 2×10⁻³)
-4. Solar avoidance angle
-5. Link distance upper bound (Earth occlusion)
-6. Cumulative radiation dose (total ionizing dose)
-7. Maximum hop count
+The default mode is conventional transparent optical RWA:
+
+1. Shortest-path routing on the LISL topology.
+2. First-fit wavelength assignment with wavelength continuity.
+3. Blocking only when no route or no continuous wavelength is available.
+4. OSNR, BER, sun-angle violations, and radiation risk are reported after setup.
+
+Set `rwa.enforce_qot_constraints: true` in `config.yaml` to make BER, sun angle,
+radiation dose, hop count, and link-distance checks reject candidate paths during
+setup.
+
+## Radiation Time Scale
+
+Radiation effects are treated as long-term satellite payload degradation. The
+mission-age cumulative dose modifies EDFA gain, NF, and ASE noise. In the default
+traditional RWA mode, radiation is not treated as an instantaneous per-lightpath
+blocking constraint.
+
+## Time-Series QoT Observation
+
+After the initial lightpaths are established, the simulator can keep their paths
+and wavelengths fixed while propagating the constellation and recomputing QoT
+over time:
+
+```bash
+python run.py --demo --num-requests 20 --observe-duration 600 --observe-step 60
+```
+
+This reports OSNR, BER, minimum sun angle, and maximum link distance over the
+post-establishment observation window.
+
+## Manuscript Figure Reproduction
+
+The manuscript-ready baseline SP+First-Fit figures use the dense WDM setting in
+`config.yaml`: 24 channels, 25 GHz channel spacing, 12.5 GHz optical filter
+bandwidth, 25 dB DEMUX/MUX isolation, and 30 dB OXC isolation.
+
+```bash
+python run.py --figures --outdir ./figures_dense25_filter12p5 --low 10 --medium 50 --high 200 --seed 42 --observe-duration 3600 --observe-step 300
+```
+
+The QoT-GLR versus baseline comparison figures and source CSVs are generated by:
+
+```bash
+python compare_qot_glr.py --outdir ./figures_qot_glr_compare --low 10 --medium 50 --high 200 --seed 42 --observe-duration 3600 --observe-step 300
+python compare_temporal_impairment_curves.py --outdir ./figures_qot_glr_compare --low 10 --medium 50 --high 200 --seed 42 --observe-duration 3600 --observe-step 300
+python compare_impairment_decomposition.py --outdir ./figures_qot_glr_compare --low 10 --medium 50 --high 200 --seed 42 --observe-duration 3600 --observe-step 300
+python compare_load_sensitive_metrics.py --outdir ./figures_qot_glr_compare --seed 42
+```
+
+The committed `figures_dense25_filter12p5/` and `figures_qot_glr_compare/`
+directories include the generated SVG/PNG/PDF figures and the CSV files used by
+the QoT-GLR comparison plots.
 
 ## CLI Reference
 
-```
+```text
 python run.py [options]
 
 Options:
   --demo                Run demonstration with sample requests
   --figures             Run multi-load simulation and generate paper figures
-  --leo                 Use representative LEO constellation (12×11)
-  --starlink            Use Starlink-scale constellation (72×22)
+  --leo                 Use representative LEO constellation (12x11)
+  --starlink            Use Starlink-scale constellation (72x22)
   --num-requests N      Number of traffic requests (default: 10)
   --config PATH         YAML configuration file path
   --outdir PATH         Output directory for figures (default: ./figures)
@@ -75,6 +132,8 @@ Options:
   --high N              High-load request count (default: 200)
   --seed N              Random seed (default: 42)
   --detail ID           Print detailed info for a specific request ID
+  --observe-duration S  Observe established-lightpath QoT for S seconds
+  --observe-step S      Time step for QoT observation (seconds)
 ```
 
 ## Dependencies
@@ -85,5 +144,5 @@ Options:
 
 ## References
 
-See `qot_simulation/references.md` for a comprehensive academic reference list
-covering all impairment models, constellation theory, and RWA algorithms.
+See `qot_simulation/references.md` for the academic reference list covering
+impairment models, constellation theory, and RWA algorithms.

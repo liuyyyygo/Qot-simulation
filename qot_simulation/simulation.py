@@ -92,8 +92,8 @@ class SimulationConfig:
     # Physical layer
     wavelength_start_nm: float = 1550.12
     wavelength_end_nm: float = 1555.75
-    channel_spacing_GHz: float = 50.0
-    num_channels: int = 40
+    channel_spacing_GHz: float = 25.0
+    num_channels: int = 24
     carrier_freq_THz: float = 193.414
     data_rate_Gbps: float = 10.0
     tx_power_dBm: float = 30.0
@@ -102,9 +102,9 @@ class SimulationConfig:
     optical_efficiency: float = 0.6
     pointing_loss_dB: float = 1.0
     oxc_insertion_loss_dB: float = 3.0
-    oxc_isolation_dB: float = 35.0
-    optical_filter_BW_GHz: float = 50.0
-    demux_isolation_dB: float = 30.0
+    oxc_isolation_dB: float = 30.0
+    optical_filter_BW_GHz: float = 12.5
+    demux_isolation_dB: float = 25.0
     rx_thermal_noise_dBm: float = -40.0
     osnr_ref_BW_GHz: float = 12.5
     rx_electrical_BW_GHz: float = 7.5
@@ -112,8 +112,8 @@ class SimulationConfig:
     # EDFA
     nominal_gain_dB: float = 20.0
     nominal_nf_dB: float = 5.0
-    gain_degradation_slope: float = 0.002
-    nf_degradation_slope: float = 0.0015
+    gain_degradation_slope: float = 0.10
+    nf_degradation_slope: float = 0.20
 
     # SAA
     saa_center_lat_deg: float = -25.0
@@ -125,6 +125,8 @@ class SimulationConfig:
 
     # Celestial
     sun_avoidance_angle_deg: float = 3.0
+    sun_coupling_scale_deg: float = 5.0
+    sun_coupling_order: float = 4.0
     sun_spectral_radiance: float = 1.5e6
     sky_spectral_radiance: float = 3.0e-4
     fov_solid_angle_sr: float = 1.0e-10
@@ -133,6 +135,7 @@ class SimulationConfig:
     max_hops: int = 12
     max_link_distance_km: float = 5400.0
     max_cumulative_dose_krad: float = 50.0
+    enforce_qot_constraints: bool = False
     use_fec: bool = True
     ber_threshold_no_fec: float = 1.0e-12
     ber_threshold_with_fec: float = 2.0e-3
@@ -143,6 +146,40 @@ class SimulationConfig:
     earth_radius_km: float = 6371.0
     mission_age_years: float = 3.0
     path_duration_yr: float = 0.1
+    qot_observation_duration_s: float = 0.0
+    qot_observation_step_s: float = 60.0
+
+    # Routing strategy
+    routing_strategy: str = "baseline"
+
+    # QoT-GLR lightweight risk model
+    qot_glr_risk_duration_s: float = 3600.0
+    qot_glr_risk_step_s: float = 900.0
+    qot_glr_pruning_threshold: float = 0.85
+    qot_glr_sun_weight: float = 0.35
+    qot_glr_distance_weight: float = 0.25
+    qot_glr_occupation_weight: float = 0.20
+    qot_glr_radiation_weight: float = 0.12
+    qot_glr_doppler_weight: float = 0.08
+    qot_glr_accum_weight: float = 0.45
+    qot_glr_bottleneck_weight: float = 0.25
+    qot_glr_temporal_weight: float = 0.20
+    qot_glr_wavelength_weight: float = 0.10
+    qot_glr_adjacent_xt_weight: float = 0.25
+
+
+@dataclass
+class LightpathQoTSample:
+    """QoT sample for an already established lightpath at one time instant."""
+    time_seconds: float
+    request_id: int
+    path_links: List[int]
+    wavelength_channel: int
+    osnr_dB: float
+    ber: float
+    q_factor: float
+    min_sun_angle_deg: float
+    max_link_distance_km: float
 
 
 class QoTSimulation:
@@ -205,6 +242,7 @@ class QoTSimulation:
                 if config.use_fec
                 else config.ber_threshold_no_fec
             ),
+            enforce_qot_constraints=config.enforce_qot_constraints,
             ber_calculator=self.ber_calc,
         )
 
@@ -218,13 +256,23 @@ class QoTSimulation:
         self.doppler = DopplerShift(
             carrier_freq_THz=self.config.carrier_freq_THz
         )
+        carrier_wavelength_m = 299792458.0 / (self.config.carrier_freq_THz * 1e12)
+        filter_spectral_BW_um = (
+            carrier_wavelength_m ** 2
+            * self.config.optical_filter_BW_GHz
+            * 1e9
+            / 299792458.0
+            * 1e6
+        )
         self.celestial = CelestialBackground(
             aperture_diameter_m=self.config.rx_aperture_diameter_mm / 1000.0,
             fov_solid_angle_sr=self.config.fov_solid_angle_sr,
-            filter_spectral_BW_um=0.4e-3,
+            filter_spectral_BW_um=filter_spectral_BW_um,
             sun_spectral_radiance=self.config.sun_spectral_radiance,
             sky_spectral_radiance=self.config.sky_spectral_radiance,
             sun_avoidance_angle_deg=self.config.sun_avoidance_angle_deg,
+            sun_coupling_scale_deg=self.config.sun_coupling_scale_deg,
+            sun_coupling_order=self.config.sun_coupling_order,
         )
         self.crosstalk = WDMCrosstalk(
             channel_spacing_GHz=self.config.channel_spacing_GHz,
@@ -307,7 +355,9 @@ class QoTSimulation:
                     received_power_per_channel_W=imp.received_signal_power_W,
                     doppler_shifts={occ_ch: imp.doppler_shift_GHz for occ_ch in occupied},
                 )
-                num_intra_interf = sum(1 for occ_ch in occupied if occ_ch == ch)
+                num_intra_interf = self._count_same_wavelength_oxc_interferers(
+                    lisl, ch
+                )
                 intra_xt_var = self.crosstalk.compute_intra_wavelength_noise_var(
                     num_interfering_ports=num_intra_interf,
                     received_power_W=imp.received_signal_power_W,
@@ -323,6 +373,26 @@ class QoTSimulation:
                 link_osnr_db[(lisl.link_id, ch)] = osnr_dB
 
         return link_osnr_db
+
+    def _count_same_wavelength_oxc_interferers(self, target_lisl: LISL, channel: int) -> int:
+        """
+        Count same-wavelength OXC leakage contributors at either endpoint.
+
+        Yang et al.'s in-band crosstalk source is other input ports carrying
+        the same nominal wavelength into the wavelength-routing node.  The
+        network-level equivalent used here counts occupied incident LISLs at
+        the two endpoint satellites, excluding the target LISL itself.
+        """
+        endpoint_sats = {target_lisl.sat_i, target_lisl.sat_j}
+        interfering_links = set()
+        for lisl in self.constellation.topology:
+            if lisl.link_id == target_lisl.link_id:
+                continue
+            if not ({lisl.sat_i, lisl.sat_j} & endpoint_sats):
+                continue
+            if channel in self.rwa.wavelength_occupancy.get(lisl.link_id, set()):
+                interfering_links.add(lisl.link_id)
+        return len(interfering_links)
 
     def compute_impairments_for_link(
         self, lisl: LISL
@@ -355,12 +425,14 @@ class QoTSimulation:
         )
 
         # 3. Celestial background
-        sun_angle = self.celestial.compute_sun_angle_deg(
-            sat_i.lat_deg,
-            sat_i.lon_deg,
-            unit_vec,
+        sun_vector = self.celestial.compute_sun_vector_ecef(
             sun_dec_deg=0.0,
-            time_hours=12.0,
+            sun_ra_deg=0.0,
+            time_hours=(12.0 + self.config.sim_time_seconds / 3600.0) % 24.0,
+        )
+        sun_angle = self.celestial.compute_bidirectional_link_sun_angle_deg(
+            unit_vec,
+            sun_vector,
         )
         celestial_noise_W, sun_blocked = self.celestial.compute_noise_power_W(
             sun_angle,
@@ -447,6 +519,273 @@ class QoTSimulation:
         for lisl in self.constellation.topology:
             self.compute_impairments_for_link(lisl)
 
+    def _qot_glr_time_points(self) -> List[float]:
+        """Return coarse trajectory sampling instants for QoT-GLR risk estimation."""
+        duration_s = max(0.0, self.config.qot_glr_risk_duration_s)
+        step_s = max(1.0, self.config.qot_glr_risk_step_s)
+        start_s = self.config.sim_time_seconds
+        points = []
+        t = 0.0
+        while t <= duration_s + 1e-9:
+            points.append(start_s + t)
+            t += step_s
+        if points[-1] < start_s + duration_s:
+            points.append(start_s + duration_s)
+        return sorted(set(round(p, 9) for p in points))
+
+    def _normalise_weighted_sum(self, terms: Dict[str, float]) -> float:
+        weights = {
+            "sun": self.config.qot_glr_sun_weight,
+            "distance": self.config.qot_glr_distance_weight,
+            "occupation": self.config.qot_glr_occupation_weight,
+            "radiation": self.config.qot_glr_radiation_weight,
+            "doppler": self.config.qot_glr_doppler_weight,
+        }
+        total_weight = sum(max(0.0, w) for w in weights.values())
+        if total_weight <= 0:
+            return 0.0
+        return sum(max(0.0, weights[k]) * terms[k] for k in weights) / total_weight
+
+    def _compute_qot_glr_link_risks(self):
+        """
+        Estimate model-derived link risks over the expected holding interval.
+
+        The risk terms follow the manuscript's QoT-GLR design: distance,
+        near-solar background, Doppler filtering, radiation-induced EDFA
+        degradation, and wavelength occupation are normalised to [0, 1].
+        """
+        original_time = self.config.sim_time_seconds
+        risk_series: Dict[int, List[float]] = {
+            lisl.link_id: [] for lisl in self.constellation.topology
+        }
+        indicators: Dict[int, Dict[str, float]] = {}
+
+        sun_core = self.config.sun_avoidance_angle_deg
+        sun_tail = self.config.sun_avoidance_angle_deg + 3.0 * self.config.sun_coupling_scale_deg
+        doppler_th = max(self.config.optical_filter_BW_GHz / 2.0, 1e-9)
+        gain_deg_th = max(
+            self.config.gain_degradation_slope * self.config.max_cumulative_dose_krad,
+            1e-9,
+        )
+
+        for time_s in self._qot_glr_time_points():
+            self._refresh_impairments_at_time(time_s)
+            for lisl in self.constellation.topology:
+                imp = self._impairment_cache[lisl.link_id]
+                occupied_count = len(
+                    self.rwa.wavelength_occupancy.get(lisl.link_id, set())
+                )
+                r_dist = min(
+                    max(imp.link_distance_km / max(self.config.max_link_distance_km, 1e-9), 0.0),
+                    1.0,
+                )
+                if imp.sun_angle_deg <= sun_core:
+                    r_sun = 1.0
+                elif imp.sun_angle_deg >= sun_tail:
+                    r_sun = 0.0
+                else:
+                    x = (sun_tail - imp.sun_angle_deg) / max(sun_tail - sun_core, 1e-9)
+                    r_sun = min(max(x, 0.0), 1.0)
+                r_dop = min(abs(imp.doppler_shift_GHz) / doppler_th, 1.0)
+                r_rad = min(max(imp.edfa_gain_degradation_dB, 0.0) / gain_deg_th, 1.0)
+                r_occ = min(occupied_count / max(self.config.num_channels, 1), 1.0)
+                terms = {
+                    "sun": r_sun,
+                    "distance": r_dist,
+                    "occupation": r_occ,
+                    "radiation": r_rad,
+                    "doppler": r_dop,
+                }
+                link_risk = self._normalise_weighted_sum(terms)
+                risk_series[lisl.link_id].append(link_risk)
+
+                item = indicators.setdefault(
+                    lisl.link_id,
+                    {
+                        "dmax": 0.0,
+                        "theta_min": 180.0,
+                        "doppler_max": 0.0,
+                        "edfa_gain_deg_max": 0.0,
+                        "occupation": occupied_count,
+                    },
+                )
+                item["dmax"] = max(item["dmax"], imp.link_distance_km)
+                item["theta_min"] = min(item["theta_min"], imp.sun_angle_deg)
+                item["doppler_max"] = max(item["doppler_max"], abs(imp.doppler_shift_GHz))
+                item["edfa_gain_deg_max"] = max(
+                    item["edfa_gain_deg_max"], imp.edfa_gain_degradation_dB
+                )
+                item["occupation"] = occupied_count
+
+        self._refresh_impairments_at_time(original_time)
+
+        link_risks = {
+            link_id: (max(values) if values else 0.0)
+            for link_id, values in risk_series.items()
+        }
+        return link_risks, risk_series, indicators
+
+    def _is_wavelength_available(self, path_links: List[int], channel: int) -> bool:
+        return all(
+            channel not in self.rwa.wavelength_occupancy.get(link_id, set())
+            for link_id in path_links
+        )
+
+    def _compute_path_result_from_osnr(
+        self,
+        request: LightpathRequest,
+        path_sats: List[int],
+        path_links: List[int],
+        wavelength: int,
+        link_osnr_db: Dict[Tuple[int, int], float],
+    ) -> LightpathResult:
+        per_link_osnr = []
+        per_link_dist = []
+        inv_osnr_sum = 0.0
+        for link_id in path_links:
+            osnr_dB = link_osnr_db.get((link_id, wavelength), 15.0)
+            osnr_lin = 10.0 ** (osnr_dB / 10.0)
+            per_link_osnr.append(osnr_dB)
+            per_link_dist.append(self.rwa_link_to_distance.get(link_id, 0.0))
+            inv_osnr_sum += 1.0 / max(osnr_lin, 1e-12)
+
+        total_osnr_lin = 1.0 / inv_osnr_sum if inv_osnr_sum > 0 else 0.0
+        total_osnr_dB = 10.0 * math.log10(max(total_osnr_lin, 1e-30))
+        ber_result = self.ber_calc.compute_ber_from_osnr(total_osnr_dB)
+
+        return LightpathResult(
+            request_id=request.request_id,
+            src_sat=request.src_sat,
+            dst_sat=request.dst_sat,
+            accepted=True,
+            path_satellites=path_sats,
+            path_links=path_links,
+            wavelength_channel=wavelength,
+            total_hops=len(path_links),
+            osnr_dB=total_osnr_dB,
+            ber=ber_result.ber,
+            q_factor=ber_result.q_factor,
+            per_link_osnr_dB=per_link_osnr,
+            per_link_distance_km=per_link_dist,
+        )
+
+    def _qot_glr_wavelength_term(self, path_links: List[int], channel: int) -> float:
+        link_by_id = {lisl.link_id: lisl for lisl in self.constellation.topology}
+        n_port = max(1, getattr(self.constellation, "max_lisl_per_sat", 4))
+        if not path_links:
+            return 0.0
+
+        total = 0.0
+        for link_id in path_links:
+            lisl = link_by_id[link_id]
+            same = self._count_same_wavelength_oxc_interferers(lisl, channel)
+            occupied = self.rwa.wavelength_occupancy.get(link_id, set())
+            adjacent = sum(
+                1 for ch in occupied if abs(ch - channel) == 1
+            )
+            total += (
+                same / n_port
+                + self.config.qot_glr_adjacent_xt_weight
+                * adjacent / max(self.config.num_channels, 1)
+            )
+        return total / len(path_links)
+
+    def _assign_qot_glr_lightpath(
+        self,
+        request: LightpathRequest,
+        link_osnr_db: Dict[Tuple[int, int], float],
+    ) -> LightpathResult:
+        """Assign a lightpath using the manuscript-inspired QoT-GLR score."""
+        result = LightpathResult(
+            request_id=request.request_id,
+            src_sat=request.src_sat,
+            dst_sat=request.dst_sat,
+            accepted=False,
+        )
+
+        link_risks, risk_series, indicators = self._compute_qot_glr_link_risks()
+        edge_weights = {}
+        for lisl in self.constellation.topology:
+            edge = (min(lisl.sat_i, lisl.sat_j), max(lisl.sat_i, lisl.sat_j))
+            ind = indicators.get(lisl.link_id, {})
+            hard_pruned = (
+                ind.get("dmax", 0.0) > self.config.max_link_distance_km
+                or ind.get("theta_min", 180.0) < self.config.sun_avoidance_angle_deg
+                or link_risks.get(lisl.link_id, 0.0) > self.config.qot_glr_pruning_threshold
+            )
+            edge_weights[edge] = (
+                float("inf")
+                if hard_pruned
+                else 1.0 + link_risks.get(lisl.link_id, 0.0)
+            )
+
+        paths = self.rwa.k_shortest_paths(
+            request.src_sat,
+            request.dst_sat,
+            self.config.k_shortest_paths,
+            link_weights=edge_weights,
+        )
+        paths = [
+            (path_sats, path_links)
+            for path_sats, path_links in paths
+            if path_links and len(path_links) <= self.config.max_hops
+            and all(edge_weights.get(
+                (min(path_sats[i], path_sats[i + 1]), max(path_sats[i], path_sats[i + 1])),
+                1.0,
+            ) < float("inf") for i in range(len(path_sats) - 1))
+        ]
+        if not paths:
+            result.reject_reason = RejectReason.NO_PATH
+            return result
+
+        best = None
+        best_score = float("inf")
+        for path_sats, path_links in paths:
+            path_len = max(len(path_links), 1)
+            accum = sum(link_risks.get(link_id, 0.0) for link_id in path_links) / path_len
+            bottleneck = max(link_risks.get(link_id, 0.0) for link_id in path_links)
+            temporal_values = []
+            series_len = max((len(risk_series.get(link_id, [])) for link_id in path_links), default=0)
+            for idx in range(series_len):
+                temporal_values.append(
+                    sum(risk_series.get(link_id, [0.0] * series_len)[idx]
+                        for link_id in path_links) / path_len
+                )
+            temporal = (
+                max(temporal_values) - min(temporal_values)
+                if temporal_values else 0.0
+            )
+
+            for wavelength in range(self.config.num_channels):
+                if not self._is_wavelength_available(path_links, wavelength):
+                    continue
+                wavelength_term = self._qot_glr_wavelength_term(path_links, wavelength)
+                score = (
+                    self.config.qot_glr_accum_weight * accum
+                    + self.config.qot_glr_bottleneck_weight * bottleneck
+                    + self.config.qot_glr_temporal_weight * temporal
+                    + self.config.qot_glr_wavelength_weight * wavelength_term
+                )
+                if score < best_score:
+                    best_score = score
+                    best = (path_sats, path_links, wavelength, score)
+
+        if best is None:
+            result.reject_reason = RejectReason.NO_WAVELENGTH
+            return result
+
+        path_sats, path_links, wavelength, score = best
+        self.rwa.allocate_wavelength(path_links, wavelength)
+        result = self._compute_path_result_from_osnr(
+            request,
+            path_sats,
+            path_links,
+            wavelength,
+            link_osnr_db,
+        )
+        result.constraint_violations = [f"QoT-GLR score={score:.4f}"]
+        return result
+
     def process_request(
         self, request: LightpathRequest
     ) -> LightpathResult:
@@ -458,6 +797,9 @@ class QoTSimulation:
         3. Verify QoT constraints
         """
         link_osnr_db = self._build_link_osnr_lookup()
+
+        if self.config.routing_strategy.lower() == "qot_glr":
+            return self._assign_qot_glr_lightpath(request, link_osnr_db)
 
         result = self.rwa.assign_lightpath(
             request=request,
@@ -498,6 +840,125 @@ class QoTSimulation:
                 )
 
         return results
+
+    def _refresh_impairments_at_time(self, time_seconds: float):
+        """Propagate the constellation and recompute all link impairments."""
+        self.config.sim_time_seconds = time_seconds
+        self.constellation.propagate(time_seconds)
+        self._impairment_cache.clear()
+        self._init_rwa_data()
+        self.compute_all_impairments()
+
+    def evaluate_established_lightpaths_over_time(
+        self,
+        results: List[LightpathResult],
+        duration_s: float,
+        step_s: float,
+    ) -> List[LightpathQoTSample]:
+        """
+        Evaluate QoT dynamics for already established lightpaths.
+
+        The path and wavelength of each accepted lightpath are kept fixed. At
+        each time sample, the constellation is propagated and impairments are
+        recomputed, then OSNR/BER are recomputed for the existing lightpaths.
+        """
+        if duration_s < 0:
+            raise ValueError("duration_s must be non-negative")
+        if step_s <= 0:
+            raise ValueError("step_s must be positive")
+
+        established = [
+            result
+            for result in results
+            if result.accepted and result.path_links and result.wavelength_channel >= 0
+        ]
+        if not established:
+            return []
+
+        samples: List[LightpathQoTSample] = []
+        time_points = []
+        t = 0.0
+        while t <= duration_s + 1e-9:
+            time_points.append(round(t, 9))
+            t += step_s
+        if time_points[-1] < duration_s:
+            time_points.append(duration_s)
+
+        for time_seconds in time_points:
+            self._refresh_impairments_at_time(time_seconds)
+            link_osnr_db = self._build_link_osnr_lookup()
+
+            for result in established:
+                inv_osnr_sum = 0.0
+                min_sun_angle = 180.0
+                max_distance = 0.0
+
+                for link_id in result.path_links:
+                    osnr_dB = link_osnr_db.get(
+                        (link_id, result.wavelength_channel),
+                        15.0,
+                    )
+                    osnr_lin = 10.0 ** (osnr_dB / 10.0)
+                    inv_osnr_sum += 1.0 / max(osnr_lin, 1e-12)
+                    min_sun_angle = min(
+                        min_sun_angle,
+                        self.rwa_link_to_sun_angle.get(link_id, 180.0),
+                    )
+                    max_distance = max(
+                        max_distance,
+                        self.rwa_link_to_distance.get(link_id, 0.0),
+                    )
+
+                total_osnr_lin = 1.0 / inv_osnr_sum if inv_osnr_sum > 0 else 0.0
+                total_osnr_dB = 10.0 * math.log10(max(total_osnr_lin, 1e-30))
+                ber_result = self.ber_calc.compute_ber_from_osnr(total_osnr_dB)
+
+                samples.append(
+                    LightpathQoTSample(
+                        time_seconds=time_seconds,
+                        request_id=result.request_id,
+                        path_links=list(result.path_links),
+                        wavelength_channel=result.wavelength_channel,
+                        osnr_dB=total_osnr_dB,
+                        ber=ber_result.ber,
+                        q_factor=ber_result.q_factor,
+                        min_sun_angle_deg=min_sun_angle,
+                        max_link_distance_km=max_distance,
+                    )
+                )
+
+        return samples
+
+    def print_time_series_qot_summary(self, samples: List[LightpathQoTSample]):
+        """Print aggregate QoT dynamics for established lightpaths."""
+        if not samples:
+            print("\nNo established lightpaths available for time-series QoT evaluation.")
+            return
+
+        ber_limit = (
+            self.config.ber_threshold_with_fec
+            if self.config.use_fec
+            else self.config.ber_threshold_no_fec
+        )
+        osnrs = [s.osnr_dB for s in samples]
+        bers = [s.ber for s in samples]
+        sun_angles = [s.min_sun_angle_deg for s in samples]
+        max_distances = [s.max_link_distance_km for s in samples]
+        ber_exceeded = sum(1 for s in samples if s.ber > ber_limit)
+
+        print(f"\n{'='*80}")
+        print("TIME-SERIES QOT SUMMARY FOR ESTABLISHED LIGHTPATHS")
+        print(f"{'='*80}")
+        print(f"Samples: {len(samples)}")
+        print(f"Time span: {min(s.time_seconds for s in samples):.1f}-"
+              f"{max(s.time_seconds for s in samples):.1f} s")
+        print(f"OSNR (dB): min {min(osnrs):.2f}, max {max(osnrs):.2f}, "
+              f"mean {np.mean(osnrs):.2f}")
+        print(f"log10(BER): min {min(np.log10(bers)):.2f}, "
+              f"max {max(np.log10(bers)):.2f}, mean {np.mean(np.log10(bers)):.2f}")
+        print(f"BER above threshold: {ber_exceeded}/{len(samples)} samples")
+        print(f"Minimum sun angle: {min(sun_angles):.2f} deg")
+        print(f"Maximum link distance: {max(max_distances):.1f} km")
 
     def print_impairment_summary(self):
         """Print a summary of physical impairments for all LISLs."""
@@ -601,7 +1062,11 @@ def build_small_config() -> SimulationConfig:
         F=1,
         altitude_km=550.0,
         inclination_deg=53.0,
-        num_channels=40,
+        num_channels=24,
+        channel_spacing_GHz=25.0,
+        optical_filter_BW_GHz=12.5,
+        demux_isolation_dB=25.0,
+        oxc_isolation_dB=30.0,
         sim_time_seconds=0.0,
         max_link_distance_km=5400.0,
     )
@@ -615,8 +1080,8 @@ def build_leo_config() -> SimulationConfig:
         F=1,
         altitude_km=550.0,
         inclination_deg=53.0,
-        num_channels=40,
-        channel_spacing_GHz=50.0,
+        num_channels=24,
+        channel_spacing_GHz=25.0,
         data_rate_Gbps=10.0,
         tx_power_dBm=30.0,
         rx_aperture_diameter_mm=80.0,
@@ -624,16 +1089,16 @@ def build_leo_config() -> SimulationConfig:
         optical_efficiency=0.6,
         pointing_loss_dB=1.0,
         oxc_insertion_loss_dB=3.0,
-        oxc_isolation_dB=35.0,
-        optical_filter_BW_GHz=50.0,
-        demux_isolation_dB=30.0,
+        oxc_isolation_dB=30.0,
+        optical_filter_BW_GHz=12.5,
+        demux_isolation_dB=25.0,
         rx_thermal_noise_dBm=-40.0,
         osnr_ref_BW_GHz=12.5,
         rx_electrical_BW_GHz=7.5,
         nominal_gain_dB=20.0,
         nominal_nf_dB=5.0,
-        gain_degradation_slope=0.002,
-        nf_degradation_slope=0.0015,
+        gain_degradation_slope=0.10,
+        nf_degradation_slope=0.20,
         background_dose_rate=0.1,
         saa_enhancement=10.0,
         saa_center_lat_deg=-25.0,
@@ -643,6 +1108,7 @@ def build_leo_config() -> SimulationConfig:
         max_hops=12,
         max_link_distance_km=5400.0,
         max_cumulative_dose_krad=50.0,
+        enforce_qot_constraints=False,
         use_fec=True,
         ber_threshold_no_fec=1.0e-12,
         ber_threshold_with_fec=2.0e-3,
@@ -651,6 +1117,8 @@ def build_leo_config() -> SimulationConfig:
         mission_age_years=3.0,
         path_duration_yr=0.1,
         sun_avoidance_angle_deg=3.0,
+        sun_coupling_scale_deg=5.0,
+        sun_coupling_order=4.0,
         sun_spectral_radiance=1.5e6,
         sky_spectral_radiance=3.0e-4,
         fov_solid_angle_sr=1.0e-10,
@@ -707,6 +1175,14 @@ def main():
         "--detail", type=int, default=None,
         help="Print detailed breakdown for a specific request ID"
     )
+    parser.add_argument(
+        "--observe-duration", type=float, default=None,
+        help="Observe established-lightpath QoT dynamics for this many seconds"
+    )
+    parser.add_argument(
+        "--observe-step", type=float, default=None,
+        help="Time step in seconds for established-lightpath QoT observation"
+    )
 
     args = parser.parse_args()
 
@@ -758,6 +1234,8 @@ def main():
             },
             "celestial": {
                 "sun_avoidance_angle_deg": "sun_avoidance_angle_deg",
+                "sun_coupling_scale_deg": "sun_coupling_scale_deg",
+                "sun_coupling_order": "sun_coupling_order",
                 "sun_spectral_radiance": "sun_spectral_radiance",
                 "sky_spectral_radiance": "sky_spectral_radiance",
                 "receiver_fov_sr": "fov_solid_angle_sr",
@@ -769,6 +1247,7 @@ def main():
                 "ber_threshold_with_fec": "ber_threshold_with_fec",
                 "k_shortest_paths": "k_shortest_paths",
                 "max_cumulative_dose_krad": "max_cumulative_dose_krad",
+                "enforce_qot_constraints": "enforce_qot_constraints",
                 "max_link_distance_km": "max_link_distance_km",
             },
             "simulation": {
@@ -776,6 +1255,8 @@ def main():
                 "earth_radius_km": "earth_radius_km",
                 "mission_age_years": "mission_age_years",
                 "path_duration_yr": "path_duration_yr",
+                "qot_observation_duration_s": "qot_observation_duration_s",
+                "qot_observation_step_s": "qot_observation_step_s",
             },
         }
         for section, mapping in section_maps.items():
@@ -790,18 +1271,31 @@ def main():
     else:
         config = build_small_config()
 
+    if args.observe_duration is not None:
+        config.qot_observation_duration_s = args.observe_duration
+    if args.observe_step is not None:
+        config.qot_observation_step_s = args.observe_step
+
     print("=" * 80)
-    print("QoT-GUARANTEED LIGHTPATH ROUTING SIMULATION")
+    print("QOT PERFORMANCE SIMULATION FOR TRADITIONAL RWA")
     print("LEO Satellite Optical Network with OXC Architecture")
     print("=" * 80)
     print(f"\nConstellation: {config.N_planes} planes x {config.sats_per_plane} sats/plane")
-    print(f"Altitude: {config.altitude_km} km | Inclination: {config.inclination_deg}°")
+    print(f"Altitude: {config.altitude_km} km | Inclination: {config.inclination_deg} deg")
     print(f"Total satellites: {config.N_planes * config.sats_per_plane}")
     print(f"WDM channels: {config.num_channels} | Spacing: {config.channel_spacing_GHz} GHz")
     print(f"Data rate: {config.data_rate_Gbps} Gbps | TX power: {config.tx_power_dBm} dBm")
     print(f"Mission age: {config.mission_age_years} yr | "
           f"FEC: {'Enabled' if config.use_fec else 'Disabled'} | "
           f"BER threshold: {config.ber_threshold_with_fec if config.use_fec else config.ber_threshold_no_fec:.0e}")
+    print(
+        "Routing mode: "
+        + (
+            "QoT-constrained SP+First-Fit"
+            if config.enforce_qot_constraints
+            else "Traditional SP+First-Fit with post-route QoT evaluation"
+        )
+    )
 
     # Initialize simulation
     sim = QoTSimulation(config)
@@ -853,6 +1347,17 @@ def main():
             osnrs = [r.osnr_dB for r in accepted_results]
             bers = [r.ber for r in accepted_results]
             hops = [r.total_hops for r in accepted_results]
+            ber_limit = (
+                config.ber_threshold_with_fec
+                if config.use_fec
+                else config.ber_threshold_no_fec
+            )
+            ber_exceeded = sum(1 for r in accepted_results if r.ber > ber_limit)
+            sun_flagged = sum(
+                1
+                for r in accepted_results
+                if any("Sun blocked" in v for v in r.constraint_violations)
+            )
 
             print(f"\n{'='*80}")
             print("ACCEPTED LIGHTPATH STATISTICS")
@@ -862,6 +1367,18 @@ def main():
             print(f"{'OSNR (dB)':<25} {min(osnrs):>10.1f} {max(osnrs):>10.1f} {np.mean(osnrs):>10.1f}")
             print(f"{'log10(BER)':<25} {min(np.log10(bers)):>10.1f} {max(np.log10(bers)):>10.1f} {np.mean(np.log10(bers)):>10.1f}")
             print(f"{'Hop Count':<25} {min(hops):>10} {max(hops):>10} {np.mean(hops):>10.1f}")
+            if not config.enforce_qot_constraints:
+                print("\nPost-route QoT observations:")
+                print(f"  BER above threshold: {ber_exceeded}/{len(accepted_results)}")
+                print(f"  Sun-angle flagged: {sun_flagged}/{len(accepted_results)}")
+
+            if config.qot_observation_duration_s > 0:
+                qot_samples = sim.evaluate_established_lightpaths_over_time(
+                    accepted_results,
+                    duration_s=config.qot_observation_duration_s,
+                    step_s=config.qot_observation_step_s,
+                )
+                sim.print_time_series_qot_summary(qot_samples)
 
     print("\nSimulation complete.")
 

@@ -9,8 +9,8 @@ constellation:
   inclination_deg: 53.0
 
 physical_layer:
-  channel_spacing_GHz: 50.0
-  num_channels: 40
+  channel_spacing_GHz: 25.0
+  num_channels: 24
   carrier_freq_THz: 193.414
   data_rate_Gbps: 10.0
   tx_power_dBm: 30.0
@@ -19,9 +19,9 @@ physical_layer:
   optical_efficiency: 0.6
   pointing_loss_dB: 1.0
   oxc_insertion_loss_dB: 3.0
-  oxc_isolation_dB: 35.0
-  optical_filter_BW_GHz: 50.0
-  demux_isolation_dB: 30.0
+  oxc_isolation_dB: 30.0
+  optical_filter_BW_GHz: 12.5
+  demux_isolation_dB: 25.0
   rx_thermal_noise_dBm: -40.0
   osnr_ref_BW_GHz: 12.5
   rx_electrical_BW_GHz: 7.5
@@ -29,8 +29,10 @@ physical_layer:
 edfa:
   nominal_gain_dB: 20.0
   nominal_nf_dB: 5.0
-  gain_degradation_slope: 0.002
-  nf_degradation_slope: 0.0015
+  # Low-dose electron-irradiation calibration for inter-satellite EDFA:
+  # about 0.5 dB output/gain loss and 1 dB NF increase at 5 krad.
+  gain_degradation_slope: 0.10
+  nf_degradation_slope: 0.20
 
 saa_radiation:
   center_lat_deg: -25.0
@@ -41,8 +43,12 @@ saa_radiation:
   saa_enhancement_factor: 10.0
 
 celestial:
+  # Sun enters receiver FOV: affected/core region following Liu et al., ICC 2025.
   sun_avoidance_angle_deg: 3.0
-  sun_spectral_radiance: 1.5e6
+  # Outside the FOV, solar background noise is extended as a smooth OSNR penalty tail.
+  sun_coupling_scale_deg: 5.0
+  sun_coupling_order: 4.0
+  sun_spectral_radiance: 1.5e+6
   sky_spectral_radiance: 3.0e-4
   receiver_fov_sr: 1.0e-10
 
@@ -51,6 +57,10 @@ rwa:
   use_fec: true
   ber_threshold_no_fec: 1.0e-12
   ber_threshold_with_fec: 2.0e-3
+  # false: traditional shortest-path + first-fit RWA accepts any route with
+  # an available wavelength, then reports QoT/BER performance after setup.
+  # true: QoT constraints reject paths during setup.
+  enforce_qot_constraints: false
   k_shortest_paths: 3
   max_cumulative_dose_krad: 50.0
   max_link_distance_km: 5400.0
@@ -60,3 +70,6 @@ simulation:
   earth_radius_km: 6371.0
   mission_age_years: 3.0
   path_duration_yr: 0.1
+  # 0 disables post-establishment time-series QoT observation.
+  qot_observation_duration_s: 0.0
+  qot_observation_step_s: 60.0

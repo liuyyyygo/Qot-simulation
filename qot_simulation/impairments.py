@@ -173,13 +173,25 @@ class CelestialBackground:
         sun_spectral_radiance: float = 1.5e6,
         sky_spectral_radiance: float = 3.0e-4,
         sun_avoidance_angle_deg: float = 3.0,
+        sun_coupling_scale_deg: float = 5.0,
+        sun_coupling_order: float = 4.0,
+        direct_sun_noise_ref_W: float = 42.4e-3,
+        direct_sun_ref_aperture_m: float = 0.01,
+        direct_sun_ref_bandwidth_um: float = 1.0e-3,
     ):
+        self.aperture_diameter_m = aperture_diameter_m
         self.aperture_area_m2 = math.pi * (aperture_diameter_m / 2.0) ** 2
         self.fov_sr = fov_solid_angle_sr
         self.filter_BW_um = filter_spectral_BW_um
         self.L_sun = sun_spectral_radiance
         self.L_sky = sky_spectral_radiance
         self.sun_avoidance_rad = math.radians(sun_avoidance_angle_deg)
+        self.sun_avoidance_angle_deg = sun_avoidance_angle_deg
+        self.sun_coupling_scale_deg = sun_coupling_scale_deg
+        self.sun_coupling_order = sun_coupling_order
+        self.direct_sun_noise_ref_W = direct_sun_noise_ref_W
+        self.direct_sun_ref_aperture_m = direct_sun_ref_aperture_m
+        self.direct_sun_ref_bandwidth_um = direct_sun_ref_bandwidth_um
 
         self.A_Omega_DeltaLambda = (
             self.aperture_area_m2 * self.fov_sr * self.filter_BW_um
@@ -230,6 +242,64 @@ class CelestialBackground:
         cos_angle = np.clip(np.dot(rx_direction, sun_ecef), -1.0, 1.0)
         return math.degrees(math.acos(cos_angle))
 
+    def compute_sun_vector_ecef(
+        self,
+        sun_dec_deg: float = 0.0,
+        sun_ra_deg: float = 0.0,
+        time_hours: float = 12.0,
+    ) -> np.ndarray:
+        """Compute a global unit Sun direction vector in the ECEF frame."""
+        sun_dec_rad = math.radians(sun_dec_deg)
+        sun_ra_rad = math.radians(sun_ra_deg)
+        greenwich_hour_angle = math.radians(15.0 * time_hours) - sun_ra_rad
+
+        sun_vec = np.array([
+            math.cos(sun_dec_rad) * math.cos(greenwich_hour_angle),
+            math.cos(sun_dec_rad) * math.sin(greenwich_hour_angle),
+            math.sin(sun_dec_rad),
+        ])
+        norm = np.linalg.norm(sun_vec)
+        if norm < 1e-12:
+            return np.array([1.0, 0.0, 0.0])
+        return sun_vec / norm
+
+    def compute_link_sun_angle_deg(
+        self,
+        receiver_view_vector_ecef: np.ndarray,
+        sun_vector_ecef: np.ndarray,
+    ) -> float:
+        """Angle between a receiver boresight/view vector and the Sun."""
+        view_norm = np.linalg.norm(receiver_view_vector_ecef)
+        sun_norm = np.linalg.norm(sun_vector_ecef)
+        if view_norm < 1e-12 or sun_norm < 1e-12:
+            return 180.0
+
+        view = receiver_view_vector_ecef / view_norm
+        sun = sun_vector_ecef / sun_norm
+        cos_angle = np.clip(np.dot(view, sun), -1.0, 1.0)
+        return math.degrees(math.acos(cos_angle))
+
+    def compute_bidirectional_link_sun_angle_deg(
+        self,
+        link_unit_vector_ecef: np.ndarray,
+        sun_vector_ecef: np.ndarray,
+    ) -> float:
+        """
+        Return the smaller sun angle seen by either endpoint of a bidirectional ISL.
+
+        The link vector points from satellite i to satellite j.  Receiver views
+        are +u at satellite i and -u at satellite j.
+        """
+        angle_i = self.compute_link_sun_angle_deg(
+            link_unit_vector_ecef,
+            sun_vector_ecef,
+        )
+        angle_j = self.compute_link_sun_angle_deg(
+            -link_unit_vector_ecef,
+            sun_vector_ecef,
+        )
+        return min(angle_i, angle_j)
+
     def compute_noise_power_W(
         self,
         sun_angle_deg: float,
@@ -241,15 +311,30 @@ class CelestialBackground:
         Reference: Leeb (1989) for sun angle dependency.
         """
         sun_angle_rad = math.radians(sun_angle_deg)
-        is_blocked = sun_angle_rad < self.sun_avoidance_rad
+        is_blocked = sun_angle_rad <= self.sun_avoidance_rad
 
-        if sun_angle_rad < math.radians(5.0):
-            suppression = math.exp(-((sun_angle_rad / math.radians(1.5)) ** 4))
+        if is_blocked:
+            solar_coupling = 1.0
         else:
-            suppression = 0.0
+            scale = max(self.sun_coupling_scale_deg, 1e-9)
+            excess_angle_deg = max(0.0, sun_angle_deg - self.sun_avoidance_angle_deg)
+            solar_coupling = math.exp(
+                -((excess_angle_deg / scale) ** self.sun_coupling_order)
+            )
 
-        sun_noise = (suppression * self.L_sun + self.L_sky) * self.A_Omega_DeltaLambda
-        p_noise = sun_noise * optical_efficiency
+        sky_noise = self.L_sky * self.A_Omega_DeltaLambda * optical_efficiency
+        direct_sun_noise = self.direct_sun_noise_ref_W
+        direct_sun_noise *= (
+            max(self.aperture_diameter_m, 1e-12)
+            / max(self.direct_sun_ref_aperture_m, 1e-12)
+        ) ** 2
+        direct_sun_noise *= (
+            max(self.filter_BW_um, 1e-12)
+            / max(self.direct_sun_ref_bandwidth_um, 1e-12)
+        )
+        direct_sun_noise *= optical_efficiency
+
+        p_noise = sky_noise + solar_coupling * direct_sun_noise
 
         return p_noise, is_blocked
 
@@ -371,8 +456,8 @@ class SAARadiation:
         amplitude_calibration: float = 1.0,
         nominal_gain_dB: float = 20.0,
         nominal_nf_dB: float = 5.0,
-        gain_degradation_slope: float = 0.002,
-        nf_degradation_slope: float = 0.0015,
+        gain_degradation_slope: float = 0.10,
+        nf_degradation_slope: float = 0.20,
         wavelength_nm: float = 1550.0,
         osnr_ref_BW_GHz: float = 12.5,
         polarization_modes: int = 2,
@@ -440,7 +525,7 @@ class SAARadiation:
         return current_dose_krad + dose_rate * time_step_years
 
     def compute_gain_degradation_dB(self, cumulative_dose_krad: float) -> float:
-        """dB-domain linear proxy: Delta_G_dB(D) = k_G * D"""
+        """Low-dose linear proxy: Delta_G_dB(D) = k_G * D."""
         return self.k_G * cumulative_dose_krad
 
     def compute_effective_gain_dB(self, cumulative_dose_krad: float) -> float:
@@ -448,7 +533,7 @@ class SAARadiation:
         return max(0.0, self.nominal_gain_dB - degradation)
 
     def compute_nf_increase_dB(self, cumulative_dose_krad: float) -> float:
-        """Delta_NF_dB(D) = k_NF * D"""
+        """Low-dose linear proxy: Delta_NF_dB(D) = k_NF * D."""
         return self.k_NF * cumulative_dose_krad
 
     def compute_effective_nf_dB(self, cumulative_dose_krad: float) -> float:
